@@ -1,0 +1,58 @@
+# Regras declarativas de seleção de modelo por tipo de tarefa.
+# Nenhum LLM decide isso "sozinho" — são regras legíveis e auditáveis.
+#
+# Cada critério é uma preferência, aplicada em ordem, sobre o catálogo já
+# filtrado (gratuito, :free, preço zero, excluindo modelos já indisponíveis).
+
+tarefas:
+  analise_geral:
+    descricao: "Raciocínio e análise textual de propósito geral, sem exigência multimodal."
+    criterios:
+      - contexto_minimo: 100000
+      - multimodal: false
+      - evitar_provedores: []   # preencher com provedores recém-falhos, se aplicável
+
+  multimodal:
+    descricao: "Tarefas que envolvem texto e imagem (ou mais) como entrada."
+    criterios:
+      - multimodal: true
+      - contexto_minimo: 200000
+
+  codigo:
+    descricao: "Tarefas de geração/revisão de código."
+    criterios:
+      - especializacao_preferida: "coding"
+      - contexto_minimo: 100000
+
+  continuidade_critica:
+    descricao: >
+      Uso específico da ponte: substituir temporariamente ChatGPT/Codex ou
+      Claude quando indisponíveis. Prioriza modelos de propósito geral já
+      confirmados como funcionais em testes anteriores do Projeto ALFA.
+    criterios:
+      - preferir_confirmados: true
+      - multimodal: false
+      - contexto_minimo: 100000
+
+# Lista de modelos já confirmados como funcionais (referência para
+# "preferir_confirmados"). Atualizar manualmente após cada novo teste
+# homologado — esta lista NÃO é atualizada automaticamente.
+modelos_confirmados:
+  - id: "nvidia/nemotron-3-ultra-550b-a55b:free"
+    provedor: "NVIDIA"
+  - id: "nvidia/nemotron-3.5-lightning:free"
+    provedor: "NVIDIA"
+  - id: "google/gemma-4-26b-a4b-it:free"
+    provedor: "Google"
+
+# Lista de modelos já testados sem sucesso (referência para exclusão).
+# Também mantida manualmente.
+modelos_nao_confirmados:
+  - id: "z-ai/glm-5.2:free"
+    motivo: "HTTP 429 (duas vezes)"
+  - id: "google/gemma-4-31b-it:free"
+    motivo: "HTTP 429"
+  - id: "minimax/minimax-m3:free"
+    motivo: "HTTP 429"
+  - id: "thinkingmachines/inkling:free"
+    motivo: "HTTP 403 (restrição de acesso, causa não determinada)"
