@@ -12,19 +12,31 @@ ALFA") e homologado manualmente nas Fases F.1–F.7 do Projeto ALFA. Ele NÃO
 substitui ChatGPT/Codex ou Claude — existe apenas para garantir continuidade
 quando um desses agentes principais estiver indisponível.
 
-## Estado atual: modo seguro (dry-run) apenas
+## Estado atual: modo seguro (dry-run) por padrão, com execução real disponível sob confirmação explícita
 
-Nesta primeira etapa, o projeto:
+Por padrão, todo fluxo (catálogo → seleção → autorização → "chamada") é
+simulado: o ponto de entrada `src/ponte_openrouter/dry_run.py` imprime o
+que seria feito e para, sem nunca alcançar uma chamada de rede de geração.
 
-- NÃO faz nenhuma chamada real de geração à API do OpenRouter;
-- NÃO executa fallback automático;
+Existe também um executor real, mínimo e deliberadamente isolado
+(`src/ponte_openrouter/executor_real.py`, acionado via
+`scripts/teste_real_ponte.py`), que faz UMA única chamada real ao
+OpenRouter — nunca mais de uma — e apenas quando:
+
+- o chamador passa `confirmar_execucao=True` explicitamente; e
+- (no script de linha de comando) o usuário confirma digitando "s"
+  interativamente antes da chamada.
+
+Sem essa dupla confirmação, nenhuma chamada é feita. O executor real:
+
+- NÃO faz retry nem troca de modelo automaticamente — se a chamada falhar,
+  apenas informa o resultado e para;
+- envia `"provider": {"allow_fallbacks": false}` no corpo da requisição,
+  impedindo que o próprio roteador do OpenRouter atenda a chamada por
+  outro provedor do mesmo modelo sem decisão humana;
 - NÃO grava nada automaticamente no Notion;
 - NÃO expõe nenhum servidor MCP;
 - NÃO se conecta ao ChatGPT.
-
-Todo fluxo (catálogo → seleção → autorização → "chamada") é simulado. O ponto
-de entrada `src/ponte_openrouter/dry_run.py` imprime o que seria feito e para,
-sem nunca alcançar uma chamada de rede de geração.
 
 ## Papéis (Governança do Projeto ALFA)
 
@@ -43,6 +55,9 @@ sem nunca alcançar uma chamada de rede de geração.
   tempo mínimo necessário.
 - A chave NUNCA é escrita em arquivo, log, teste, saída de teste ou
   variável de ambiente persistente.
+- No executor real, a chave é descartada da memória (`del chave`) assim
+  que a chamada HTTP termina, e a resposta do modelo é sempre truncada a
+  300 caracteres na saída — nunca a resposta integral sem limite.
 - `.gitignore` bloqueia qualquer arquivo que pareça conter segredo
   (`*credential*`, `*secret*`, `*token*`, `.env`, etc.).
 - `tests/test_seguranca_logs.py` varre as saídas geradas nos testes e falha
@@ -56,8 +71,6 @@ Ver `docs/ARQUITETURA.md` para os 6 componentes e o fluxo completo de decisão.
 
 - Leitura automática de contexto mínimo diretamente do Notion (hoje,
   `contexto.py` apenas recebe um resumo já pronto como parâmetro).
-- Execução real de chamadas (fora do modo dry-run), sempre atrás do portão
-  de autorização humana.
 - Compatibilidade MCP para expor esta camada ao ChatGPT/Codex.
 - Gravação automática de resultados no Notion (hoje, o registro continua
   manual e revisado, como em todas as fases anteriores do Projeto ALFA).
