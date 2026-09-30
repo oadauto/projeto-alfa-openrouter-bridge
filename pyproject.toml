@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+# OR.12: elimina a necessidade de definir PYTHONPATH=.\src manualmente
+# antes de rodar `py -m pytest tests -q`. `pythonpath` é uma opção nativa
+# do pytest (>=7.0, já exigido em requirements.txt) - nenhuma dependência
+# nova foi adicionada.
+pythonpath = ["src"]
+testpaths = ["tests"]

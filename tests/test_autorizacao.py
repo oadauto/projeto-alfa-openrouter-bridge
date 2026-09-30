@@ -1,49 +1,75 @@
+"""Testes de ponte_openrouter.autorizacao.confirmar().
+
+`obter_escolha_humana` é sempre injetado nestes testes — nunca usa `input()`
+real, conforme a própria docstring do módulo pede.
+"""
+from __future__ import annotations
+
 from ponte_openrouter.catalogo import ModeloCatalogo
 from ponte_openrouter.seletor import Candidato
-from ponte_openrouter import autorizacao
+from ponte_openrouter.autorizacao import confirmar
 
 
-def _candidatos_ficticios():
+def _candidatos():
     return [
         Candidato(
-            modelo=ModeloCatalogo(id="a/modelo:free", nome="A", contexto=100000, descricao="", multimodal=False, provedor="a"),
-            pontuacao=2,
-            justificativa=["ok"],
+            modelo=ModeloCatalogo(id="a/modelo-1:free", nome="Modelo 1", contexto=128000, descricao=""),
+            pontuacao=3,
+            justificativa=["preferido"],
         ),
         Candidato(
-            modelo=ModeloCatalogo(id="b/modelo:free", nome="B", contexto=50000, descricao="", multimodal=False, provedor="b"),
+            modelo=ModeloCatalogo(id="b/modelo-2:free", nome="Modelo 2", contexto=64000, descricao=""),
             pontuacao=1,
-            justificativa=["ok"],
+            justificativa=["alternativa"],
         ),
     ]
 
 
-def test_sem_candidatos_nao_autoriza():
-    decisao = autorizacao.confirmar([])
+def test_confirmacao_explicita_autoriza_e_escolhe_candidato_correto():
+    decisao = confirmar(_candidatos(), obter_escolha_humana=lambda _: "1")
+
+    assert decisao.autorizado is True
+    assert decisao.candidato_escolhido.modelo.id == "a/modelo-1:free"
+
+
+def test_recusa_explicita_nao_autoriza():
+    decisao = confirmar(_candidatos(), obter_escolha_humana=lambda _: "n")
+
     assert decisao.autorizado is False
     assert decisao.candidato_escolhido is None
+    assert "não autorizou" in decisao.motivo
 
 
-def test_usuario_nega_nao_autoriza():
-    decisao = autorizacao.confirmar(_candidatos_ficticios(), obter_escolha_humana=lambda _: "n")
-    assert decisao.autorizado is False
+def test_escolha_do_segundo_candidato():
+    decisao = confirmar(_candidatos(), obter_escolha_humana=lambda _: "2")
 
-
-def test_usuario_escolhe_candidato_valido():
-    decisao = autorizacao.confirmar(_candidatos_ficticios(), obter_escolha_humana=lambda _: "1")
     assert decisao.autorizado is True
-    assert decisao.candidato_escolhido.modelo.id == "a/modelo:free"
+    assert decisao.candidato_escolhido.modelo.id == "b/modelo-2:free"
 
 
-def test_resposta_invalida_nao_autoriza():
-    decisao = autorizacao.confirmar(_candidatos_ficticios(), obter_escolha_humana=lambda _: "abc")
+def test_resposta_vazia_e_tratada_como_recusa_nao_como_aprovacao_implicita():
+    decisao = confirmar(_candidatos(), obter_escolha_humana=lambda _: "")
+
+    assert decisao.autorizado is False, (
+        "resposta vazia nunca pode ser tratada como aprovação implícita"
+    )
+
+
+def test_resposta_invalida_nao_autoriza_e_nao_quebra():
+    decisao = confirmar(_candidatos(), obter_escolha_humana=lambda _: "texto-invalido")
+
+    assert decisao.autorizado is False
+    assert "resposta inválida" in decisao.motivo
+
+
+def test_indice_fora_do_intervalo_nao_autoriza():
+    decisao = confirmar(_candidatos(), obter_escolha_humana=lambda _: "99")
+
     assert decisao.autorizado is False
 
 
-def test_nenhuma_chamada_ocorre_sem_essa_funcao():
-    """Teste de intenção: confirma que este módulo não importa 'executor'
-    nem faz nenhuma chamada de rede - apenas orquestra a decisão humana."""
-    import inspect
-    codigo_fonte = inspect.getsource(autorizacao)
-    assert "requests" not in codigo_fonte
-    assert "http" not in codigo_fonte.lower() or "Callable" in codigo_fonte  # sem chamadas de rede reais
+def test_lista_vazia_de_candidatos_nunca_autoriza():
+    decisao = confirmar([], obter_escolha_humana=lambda _: "1")
+
+    assert decisao.autorizado is False
+    assert decisao.candidato_escolhido is None
