@@ -46,6 +46,19 @@ espelhando o mesmo padrão de import tardio já usado dentro do próprio
 NUNCA tocando `executor_real`, `requests`, `urllib`, `httpx` ou
 `credencial` - isso é verificado por teste (ver test_orquestrador.py).
 Este módulo nunca importa Notion nem nenhum cliente MCP, em nenhum modo.
+
+Fase 2 (integração mínima ao contrato do harness): adiciona
+`sanitizar_resultado()` e `executar_via_contrato()`, que adaptam um
+`ResultadoOrquestrado` para o `ResultadoSanitizado` definido em
+`harness_contrato.py`, sem introduzir nenhuma chamada de rede nova e sem
+alterar em nada o comportamento de `orquestrar()` acima (que continua
+podendo ser chamado diretamente, como antes). `executar_via_contrato()`
+apenas reaproveita, por composição, o portão de aprovação humana já
+existente em `harness_contrato.aprovar_modo_real()` - nenhuma nova
+abstração de autorização foi criada aqui; é o mesmo portão, chamado antes
+de `orquestrar()` ser invocado. `harness_contrato` é puro stdlib (não
+importa rede/credencial/Notion/MCP), então importá-lo aqui não viola a
+regra de separação testada em `test_separacao.py`.
 """
 
 from __future__ import annotations
@@ -58,7 +71,9 @@ from . import catalogo as catalogo_mod
 from . import contexto as contexto_mod
 from . import executor as executor_mod
 from . import seletor as seletor_mod
+from . import harness_contrato as harness_contrato_mod
 from .seletor import Candidato
+from .harness_contrato import EntradaTarefa, ResultadoSanitizado
 
 
 ID_MODO_SEPARADO_ROTEADOR = "openrouter/free"
@@ -256,3 +271,91 @@ def orquestrar(
 
     resultado.encerrado_por = "candidatos_esgotados"
     return resultado
+
+
+def sanitizar_resultado(resultado: ResultadoOrquestrado) -> ResultadoSanitizado:
+    """Fase 2: converte um `ResultadoOrquestrado` (formato interno deste
+    módulo) em um `ResultadoSanitizado` (formato do contrato do harness),
+    preservando exatamente os campos exigidos: modelo selecionado,
+    categoria, origem do erro, número de tentativas, indicação explícita
+    de fallback, resposta (já limitada a 300 caracteres por
+    `ResultadoSanitizado.__post_init__`, que também rejeita categorias e
+    origens fora do vocabulário fechado do contrato).
+
+    Não inventa dados: quando não há nenhuma tentativa (`sem_candidatos`),
+    a categoria é "nao_executado" e a origem "nao_aplicavel" - nunca um
+    valor de sucesso implícito.
+    """
+    numero_tentativas = len(resultado.tentativas)
+
+    if not resultado.tentativas:
+        return ResultadoSanitizado(
+            modelo=None,
+            status_http=None,
+            categoria="nao_executado",
+            duracao_segundos=None,
+            numero_tentativas=0,
+            fallback_utilizado=False,
+            resposta=None,
+            origem_erro="nao_aplicavel",
+        )
+
+    ultima_tentativa = resultado.tentativas[-1]
+    modelo = resultado.candidato_final.modelo.id if resultado.candidato_final else ultima_tentativa.modelo_id
+
+    return ResultadoSanitizado(
+        modelo=modelo,
+        status_http=None,  # não rastreado em TentativaCandidato nesta fase
+        categoria=ultima_tentativa.categoria,
+        duracao_segundos=None,  # não rastreado em TentativaCandidato nesta fase
+        numero_tentativas=numero_tentativas,
+        fallback_utilizado=numero_tentativas >= 2,
+        resposta=ultima_tentativa.resposta_sanitizada,
+        origem_erro=ultima_tentativa.origem_erro,
+    )
+
+
+def executar_via_contrato(
+    tarefa: str,
+    modelos_brutos: list[dict],
+    resumo_curado: str,
+    *,
+    modo: str = "dryrun",
+    obter_escolha_humana: Callable[[str], str] | None = None,
+    prompt_ficticio: str | None = None,
+    papel_executor: str = "alfa",
+    aprovado_por_humano: bool = False,
+) -> ResultadoSanitizado:
+    """Fase 2: ponto de entrada que passa primeiro pelo portão de
+    aprovação e pelo portão de papel definidos em `harness_contrato.py`
+    (reaproveitados por composição, não duplicados aqui) antes de delegar
+    a `orquestrar()`. Em modo="real" sem `aprovado_por_humano=True`, isto
+    levanta `AprovacaoAusenteError` e `orquestrar()` nunca chega a ser
+    chamado - nenhuma tentativa, nenhuma chamada real, nenhum acesso a
+    `executor_real`/`credencial`/rede ocorre nesse caso.
+    """
+    entrada = EntradaTarefa(
+        tarefa=tarefa,
+        modelos_brutos=tuple(modelos_brutos),
+        resumo_curado=resumo_curado,
+        modo=modo,
+    )
+
+    def _executor(_entrada: EntradaTarefa, _obter_escolha_humana):
+        resultado = orquestrar(
+            tarefa=_entrada.tarefa,
+            modelos_brutos=list(_entrada.modelos_brutos),
+            resumo_curado=_entrada.resumo_curado,
+            modo=_entrada.modo,
+            obter_escolha_humana=_obter_escolha_humana,
+            prompt_ficticio=prompt_ficticio,
+        )
+        return sanitizar_resultado(resultado)
+
+    return harness_contrato_mod.executar_contrato(
+        entrada,
+        _executor,
+        papel_executor=papel_executor,
+        obter_escolha_humana=obter_escolha_humana,
+        aprovado_por_humano=aprovado_por_humano,
+    )
