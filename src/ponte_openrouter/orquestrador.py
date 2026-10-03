@@ -105,6 +105,23 @@ class TentativaCandidato:
     # nunca inclui chave, token ou cabeçalho de autorização nesse campo -
     # este orquestrador apenas transporta o valor, sem reprocessá-lo.
     # None em modo dry-run e em qualquer tentativa sem sucesso HTTP 200.
+    status_http: int | None = None
+    # Fase 3: espelha executor_real.ResultadoReal.codigo_http (nome do campo
+    # alinhado ao vocabulário do contrato - harness_contrato.ResultadoSanitizado
+    # já usa "status_http"). None em dry-run; qualquer inteiro válido (incluindo
+    # 0, se algum dia existir) é preservado tal como recebido.
+    duracao_segundos: float | None = None
+    # Fase 3: duração da tentativa individual deste candidato. NOTA DE
+    # AMBIGUIDADE (ver relatório da Fase 3): executor_real.ResultadoReal não
+    # expõe nenhum campo de duração hoje, e executor_real.py está fora do
+    # escopo de alteração desta fase. Por isso a duração é medida aqui, em
+    # orquestrador.py, estritamente ao redor da chamada a
+    # executor_real.executar_chamada_real() (time.monotonic antes/depois) -
+    # cobre a chamada HTTP e o processamento imediato da resposta dentro de
+    # executar_chamada_real(), mas também inclui o overhead (desprezível) da
+    # própria chamada de função Python, não só o tempo de rede em si. Nunca
+    # mede a duração de toda a sequência de fallback do orquestrador - cada
+    # tentativa tem sua própria duração independente. None em dry-run.
 
 
 @dataclass
@@ -226,12 +243,20 @@ def orquestrar(
         # caminho dry-run) - mesma disciplina de import tardio já usada em
         # executor_real.py para `requests`.
         from . import executor_real as executor_real_mod
+        import time as time_mod
 
+        # Fase 3: duração medida estritamente ao redor desta chamada (ver
+        # nota em TentativaCandidato.duracao_segundos acima) - executor_real
+        # não expõe duração própria e está fora do escopo de alteração desta
+        # fase, então este é o ponto mais próximo possível da chamada real
+        # sem tocar em executor_real.py.
+        inicio_tentativa = time_mod.monotonic()
         resultado_real = executor_real_mod.executar_chamada_real(
             candidato.modelo.id,
             prompt_ficticio,
             confirmar_execucao=True,
         )
+        duracao_tentativa = time_mod.monotonic() - inicio_tentativa
 
         # OR.12: transporta a resposta já sanitizada/truncada de
         # executor_real (nunca a resposta bruta, nunca chave/token/cabeçalho -
@@ -251,6 +276,10 @@ def orquestrar(
             aprovado_por_humano=True,
             mensagem=resultado_real.mensagem,
             resposta_sanitizada=resposta_sanitizada,
+            # Fase 3: codigo_http pode legitimamente ser 0 ou qualquer
+            # inteiro - usar "is not None" (nunca truthiness) preserva isso.
+            status_http=resultado_real.codigo_http if resultado_real.codigo_http is not None else None,
+            duracao_segundos=duracao_tentativa,
         )
         resultado.tentativas.append(tentativa)
 
@@ -282,6 +311,12 @@ def sanitizar_resultado(resultado: ResultadoOrquestrado) -> ResultadoSanitizado:
     `ResultadoSanitizado.__post_init__`, que também rejeita categorias e
     origens fora do vocabulário fechado do contrato).
 
+    Fase 3: propaga também `status_http` e `duracao_segundos` da última
+    tentativa, quando disponíveis (sempre `None` em dry-run, já que
+    `TentativaCandidato` só os preenche no caminho real). Usa "is not None"
+    para preservar corretamente valores como `status_http=0` ou
+    `duracao_segundos=0.0`, nunca convertendo-os para `None` por engano.
+
     Não inventa dados: quando não há nenhuma tentativa (`sem_candidatos`),
     a categoria é "nao_executado" e a origem "nao_aplicavel" - nunca um
     valor de sucesso implícito.
@@ -305,9 +340,9 @@ def sanitizar_resultado(resultado: ResultadoOrquestrado) -> ResultadoSanitizado:
 
     return ResultadoSanitizado(
         modelo=modelo,
-        status_http=None,  # não rastreado em TentativaCandidato nesta fase
+        status_http=ultima_tentativa.status_http if ultima_tentativa.status_http is not None else None,
         categoria=ultima_tentativa.categoria,
-        duracao_segundos=None,  # não rastreado em TentativaCandidato nesta fase
+        duracao_segundos=ultima_tentativa.duracao_segundos if ultima_tentativa.duracao_segundos is not None else None,
         numero_tentativas=numero_tentativas,
         fallback_utilizado=numero_tentativas >= 2,
         resposta=ultima_tentativa.resposta_sanitizada,
