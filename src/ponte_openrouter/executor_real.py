@@ -29,6 +29,10 @@ from .executor import classificar_http
 
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Deve ser menor que o timeout externo do cliente local (30s), para que uma
+# expiração HTTP consiga voltar como erro estruturado antes de o subprocesso
+# ser encerrado pela camada externa.
+TIMEOUT_REQUISICAO_SEGUNDOS = 20
 
 
 @dataclass
@@ -79,7 +83,7 @@ def executar_chamada_real(
                 # sucesso vindo de um provedor que o usuário não escolheu.
                 "provider": {"allow_fallbacks": False},
             },
-            timeout=30,
+            timeout=TIMEOUT_REQUISICAO_SEGUNDOS,
         )
     finally:
         del chave  # descarta a referência à chave assim que a chamada termina
