@@ -1,4 +1,4 @@
-"""Cliente local do adaptador harness — Projeto ALFA, Fases 4B e 4E.
+"""Cliente local do adaptador harness — Projeto ALFA, Fases 4B, 4E e 5.
 
 Ponte técnica, não decisória: este script existe exclusivamente para que
 Claude (o agente principal e orquestrador do sistema) tenha uma forma
@@ -32,6 +32,16 @@ sobrescrevível por chamador programático via o parâmetro `timeout` de
 `invocar_adaptador`); não há escrita implícita de timeout maior em caso
 de falha, e nenhuma tentativa é repetida automaticamente.
 
+## Fase 5 — observabilidade segura (opt-in)
+
+`invocar_adaptador_observado()` e a opção `--log CAMINHO` do script
+acrescentam um registro de observabilidade (uma linha JSON por chamada) com
+código de saída, duração, modelo, status HTTP, sucesso/falha e um trecho
+saneado de stderr - por lista branca, sem a resposta do modelo e sem
+qualquer segredo (ver `observabilidade.py`). Sem `--log`/`log_path`, nada é
+gravado e o comportamento é idêntico ao da Fase 4E. O stdout do script
+continua contendo somente o resultado do harness.
+
 ## Uso como script (stdin/stdout, espelha o adaptador)
 
     py scripts\\cliente_harness_local.py < entrada.json
@@ -47,7 +57,10 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+from observabilidade import construir_registro, gravar_registro
 
 ADAPTADOR = Path(__file__).resolve().parent / "adaptador_harness.py"
 
@@ -55,6 +68,85 @@ ADAPTADOR = Path(__file__).resolve().parent / "adaptador_harness.py"
 # Não há fallback para um timeout maior nem retry automático: ao expirar,
 # a chamada falha de forma estruturada e para (ver invocar_adaptador).
 TIMEOUT_PADRAO_SEGUNDOS = 30.0
+
+
+def _bytes_para_texto(valor) -> str:
+    if valor is None:
+        return ""
+    if isinstance(valor, (bytes, bytearray)):
+        return bytes(valor).decode("utf-8", errors="replace")
+    return str(valor)
+
+
+def _invocar_com_detalhes(entrada: dict, timeout: float = TIMEOUT_PADRAO_SEGUNDOS) -> tuple[dict, int, dict]:
+    """Núcleo de `invocar_adaptador` (comportamento funcional idêntico ao da
+    Fase 4E) que também devolve detalhes brutos para a observabilidade da
+    Fase 5: `{"stdout": str, "stderr": str, "duracao": float}`.
+
+    Os detalhes são só informação adicional: nunca alteram `saida` nem o
+    código de saída, e os textos brutos aqui contidos NÃO devem ser
+    impressos nem gravados sem passar por `observabilidade.construir_registro`
+    (que aplica lista branca, saneamento e truncamento).
+    """
+    inicio = time.monotonic()
+    detalhes = {"stdout": "", "stderr": "", "duracao": 0.0}
+
+    def _fim(saida: dict, codigo: int) -> tuple[dict, int, dict]:
+        detalhes["duracao"] = time.monotonic() - inicio
+        return saida, codigo, detalhes
+
+    try:
+        entrada_serializada = json.dumps(entrada)
+        processo = subprocess.run(
+            [sys.executable, str(ADAPTADOR)],
+            input=entrada_serializada,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        detalhes["stdout"] = _bytes_para_texto(exc.stdout)
+        detalhes["stderr"] = _bytes_para_texto(exc.stderr)
+        return _fim(
+            {
+                "erro": f"o adaptador não respondeu dentro do timeout de {timeout}s.",
+                "tipo_erro": "TimeoutExpired",
+            },
+            1,
+        )
+    except OSError as exc:
+        return _fim(
+            {"erro": f"falha ao invocar o adaptador: {type(exc).__name__}.", "tipo_erro": type(exc).__name__},
+            1,
+        )
+    except (TypeError, ValueError) as exc:
+        # json.dumps(entrada) falhou - entrada contém algo não serializável.
+        # Nunca repassamos o conteúdo de `entrada` na mensagem de erro.
+        return _fim(
+            {"erro": "entrada não é serializável em JSON.", "tipo_erro": type(exc).__name__},
+            2,
+        )
+    except Exception as exc:  # noqa: BLE001 - último guarda-chuva; nunca deixar vazar.
+        return _fim(
+            {"erro": "falha inesperada ao invocar o adaptador.", "tipo_erro": type(exc).__name__},
+            1,
+        )
+
+    detalhes["stdout"] = _bytes_para_texto(processo.stdout)
+    detalhes["stderr"] = _bytes_para_texto(processo.stderr)
+
+    try:
+        saida = json.loads(processo.stdout)
+    except json.JSONDecodeError as exc:
+        return _fim(
+            {
+                "erro": f"o adaptador devolveu uma saída que não é JSON válido: {exc}",
+                "tipo_erro": "JSONDecodeError",
+            },
+            processo.returncode if processo.returncode != 0 else 1,
+        )
+
+    return _fim(saida, processo.returncode)
 
 
 def invocar_adaptador(entrada: dict, timeout: float = TIMEOUT_PADRAO_SEGUNDOS) -> tuple[dict, int]:
@@ -83,53 +175,50 @@ def invocar_adaptador(entrada: dict, timeout: float = TIMEOUT_PADRAO_SEGUNDOS) -
     mensagens aqui descrevem apenas o tipo de falha técnica, nunca o
     conteúdo de `entrada`).
     """
-    try:
-        entrada_serializada = json.dumps(entrada)
-        processo = subprocess.run(
-            [sys.executable, str(ADAPTADOR)],
-            input=entrada_serializada,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return (
-            {
-                "erro": f"o adaptador não respondeu dentro do timeout de {timeout}s.",
-                "tipo_erro": "TimeoutExpired",
-            },
-            1,
-        )
-    except OSError as exc:
-        return (
-            {"erro": f"falha ao invocar o adaptador: {type(exc).__name__}.", "tipo_erro": type(exc).__name__},
-            1,
-        )
-    except (TypeError, ValueError) as exc:
-        # json.dumps(entrada) falhou - entrada contém algo não serializável.
-        # Nunca repassamos o conteúdo de `entrada` na mensagem de erro.
-        return (
-            {"erro": "entrada não é serializável em JSON.", "tipo_erro": type(exc).__name__},
-            2,
-        )
-    except Exception as exc:  # noqa: BLE001 - último guarda-chuva; nunca deixar vazar.
-        return (
-            {"erro": "falha inesperada ao invocar o adaptador.", "tipo_erro": type(exc).__name__},
-            1,
-        )
+    saida, codigo_saida, _detalhes = _invocar_com_detalhes(entrada, timeout)
+    return saida, codigo_saida
 
-    try:
-        saida = json.loads(processo.stdout)
-    except json.JSONDecodeError as exc:
-        return (
-            {
-                "erro": f"o adaptador devolveu uma saída que não é JSON válido: {exc}",
-                "tipo_erro": "JSONDecodeError",
-            },
-            processo.returncode if processo.returncode != 0 else 1,
-        )
 
-    return saida, processo.returncode
+def invocar_adaptador_observado(
+    entrada: dict,
+    timeout: float = TIMEOUT_PADRAO_SEGUNDOS,
+    log_path=None,
+) -> tuple[dict, int, dict]:
+    """Fase 5 - igual a `invocar_adaptador`, mais um registro de
+    observabilidade seguro.
+
+    Devolve `(saida, codigo_saida, registro)`. `saida` e `codigo_saida` são
+    exatamente os de `invocar_adaptador`. `registro` é construído por lista
+    branca (ver `observabilidade.py`): código de saída, duração, modelo,
+    status HTTP, sucesso/falha, tipo de erro, comprimentos de stdout/stderr e
+    um trecho saneado e truncado de stderr. A resposta do modelo nunca entra
+    no registro.
+
+    Só grava em disco se `log_path` for informado (opt-in explícito); a
+    gravação acrescenta uma linha JSON e uma falha ao gravar nunca altera
+    `saida`, `codigo_saida` nem levanta exceção.
+    """
+    saida, codigo_saida, detalhes = _invocar_com_detalhes(entrada, timeout)
+    registro = construir_registro(
+        saida,
+        codigo_saida,
+        detalhes["duracao"],
+        stdout=detalhes["stdout"],
+        stderr=detalhes["stderr"],
+    )
+    if log_path is not None:
+        registro = gravar_registro(registro, log_path)
+    return saida, codigo_saida, registro
+
+
+def _ler_log_path(argv: list[str]):
+    """Fase 5: lê `--log CAMINHO` (opt-in). Qualquer outro argumento é
+    ignorado, como antes. Sem `--log`, nada é gravado em disco."""
+    if "--log" in argv:
+        indice = argv.index("--log")
+        if indice + 1 < len(argv):
+            return argv[indice + 1]
+    return None
 
 
 def main() -> int:
@@ -145,7 +234,13 @@ def main() -> int:
     # aqui (fora do que invocar_adaptador já trata) produz JSON estruturado
     # em stdout, nunca um traceback bruto e nunca stdout vazio.
     try:
-        saida, codigo_saida = invocar_adaptador(entrada)
+        log_path = _ler_log_path(sys.argv[1:])
+        if log_path is None:
+            saida, codigo_saida = invocar_adaptador(entrada)
+        else:
+            # Fase 5: o stdout continua sendo SOMENTE o resultado do harness;
+            # o registro de observabilidade vai apenas para o arquivo.
+            saida, codigo_saida, _registro = invocar_adaptador_observado(entrada, log_path=log_path)
         print(json.dumps(saida, ensure_ascii=False))
     except Exception as exc:  # noqa: BLE001
         print(json.dumps({"erro": "falha inesperada no cliente local.", "tipo_erro": type(exc).__name__}))
