@@ -63,6 +63,13 @@ Sem essa dupla confirmação, nenhuma chamada é feita. O executor real:
 - `tests/test_seguranca_logs.py` varre as saídas geradas nos testes e falha
   caso encontre qualquer padrão de chave/segredo.
 
+## Observabilidade (Fase 5 / 5.2)
+
+O cliente harness local aceita `--log logs\ARQUIVO.jsonl` (opt-in) para
+registrar, por lista branca, codigo de saida, duracao, modelo, status HTTP e
+sucesso/falha - nunca a resposta do modelo, o prompt, mensagens livres de erro
+ou segredos. Ver `docs/fase5-observabilidade.md`.
+
 ## Estrutura
 
 Ver `docs/ARQUITETURA.md` para os 6 componentes e o fluxo completo de decisão.

@@ -9,6 +9,7 @@ existem apenas para provar que o saneamento os remove.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import cliente_harness_local  # noqa: E402
 import observabilidade  # noqa: E402
 from cliente_harness_local import invocar_adaptador, invocar_adaptador_observado  # noqa: E402
-from observabilidade import construir_registro, gravar_registro, sanitizar_texto  # noqa: E402
+from observabilidade import (  # noqa: E402
+    LIMITE_ARQUIVO_BYTES,
+    LogPathInvalido,
+    MENSAGEM_ERRO_OMITIDA,
+    construir_registro,
+    gravar_registro,
+    sanitizar_texto,
+    validar_caminho_log,
+)
 
 # Valores fictícios, com o formato típico de segredos - NUNCA reais.
 CHAVE_FICTICIA = "sk-or-v1-FICTICIA0123456789abcdefghijklmnop"
@@ -301,9 +310,24 @@ def test_gravar_registro_direto_devolve_flags_corretas(tmp_path):
 # --- CLI ----------------------------------------------------------------------
 
 
-def test_cli_com_log_mantem_stdout_somente_json_e_grava_o_arquivo(tmp_path):
+def _rodar_cli(args, entrada=None, cwd=None):
     script = Path(cliente_harness_local.__file__).resolve()
-    destino = tmp_path / "cli.jsonl"
+    return subprocess.run(
+        [sys.executable, str(script), *args],
+        input=json.dumps(entrada if entrada is not None else _entrada_dryrun_basica()),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=cwd,
+    )
+
+
+def test_cli_com_log_mantem_stdout_somente_json_e_grava_o_arquivo():
+    script = Path(cliente_harness_local.__file__).resolve()
+    pasta_logs = cliente_harness_local.RAIZ_LOGS
+    pasta_logs.mkdir(exist_ok=True)
+    destino = pasta_logs / f"teste_fase52_{os.getpid()}.jsonl"
+    destino.unlink(missing_ok=True)
     processo = subprocess.run(
         [sys.executable, str(script), "--log", str(destino)],
         input=json.dumps(_entrada_dryrun_basica()),
@@ -318,7 +342,10 @@ def test_cli_com_log_mantem_stdout_somente_json_e_grava_o_arquivo(tmp_path):
     saida = json.loads(linhas[0])
     assert saida["categoria"] == "sucesso_simulado"
     assert "log_gravado" not in saida  # o registro vai só para o arquivo
-    registros = [json.loads(linha) for linha in destino.read_text(encoding="utf-8").splitlines()]
+    try:
+        registros = [json.loads(linha) for linha in destino.read_text(encoding="utf-8").splitlines()]
+    finally:
+        destino.unlink(missing_ok=True)
     assert len(registros) == 1 and registros[0]["sucesso"] is True
 
 
@@ -359,3 +386,88 @@ def test_modulo_observabilidade_nao_importa_rede_nem_credencial():
     codigo = Path(observabilidade.__file__).read_text(encoding="utf-8")
     for proibido in ("import requests", "import urllib", "import socket", "openrouter.ai"):
         assert proibido not in codigo
+
+
+# --- Fase 5.2 -----------------------------------------------------------------
+
+
+def test_erro_livre_nunca_e_gravado_so_o_tipo(tmp_path):
+    saida = {"erro": f"falha com dado sensivel {CHAVE_FICTICIA} e texto livre qualquer", "tipo_erro": "ValueError"}
+    registro = construir_registro(saida, 2, 0.1, stdout="", stderr="")
+    assert registro["erro"] == MENSAGEM_ERRO_OMITIDA
+    assert registro["tipo_erro"] == "ValueError"
+    serializado = json.dumps(registro)
+    assert "texto livre qualquer" not in serializado and CHAVE_FICTICIA not in serializado
+
+
+def test_validar_caminho_aceita_arquivo_jsonl_dentro_de_logs(tmp_path):
+    raiz = tmp_path / "logs"
+    assert validar_caminho_log(raiz / "a.jsonl", raiz) == (raiz / "a.jsonl").resolve()
+    assert validar_caminho_log(raiz / "sub" / "b.jsonl", raiz).name == "b.jsonl"
+
+
+@pytest.mark.parametrize("ruim", [None, "", "   "])
+def test_validar_caminho_recusa_ausente_ou_vazio(tmp_path, ruim):
+    with pytest.raises(LogPathInvalido):
+        validar_caminho_log(ruim, tmp_path / "logs")
+
+
+def test_validar_caminho_recusa_fora_de_logs_sufixo_errado_e_travessia(tmp_path):
+    raiz = tmp_path / "logs"
+    for ruim in (
+        tmp_path / "outro.jsonl",
+        raiz / "a.txt",
+        raiz / ".." / "fuga.jsonl",
+        raiz,
+        tmp_path / "logs_irmao" / "a.jsonl",
+    ):
+        with pytest.raises(LogPathInvalido):
+            validar_caminho_log(ruim, raiz)
+
+
+@pytest.mark.parametrize("args", [["--log"], ["--log", "--outra"], ["--log", "fora_de_logs.jsonl"], ["--log", "logs/x.txt"]])
+def test_cli_recusa_log_invalido_sem_executar_o_harness(tmp_path, args):
+    processo = _rodar_cli(args, cwd=tmp_path)
+    assert processo.returncode == 2
+    saida = json.loads(processo.stdout)
+    assert saida["tipo_erro"] == "LogPathInvalido"
+    assert "fora_de_logs" not in processo.stdout  # não ecoa o caminho informado
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_rotacao_move_o_log_cheio_para_ponto_1_e_recomeca(tmp_path):
+    destino = tmp_path / "obs.jsonl"
+    registro = construir_registro({"modelo": "m", "categoria": "sucesso"}, 0, 0.1, stdout="{}", stderr="")
+    gravar_registro(registro, destino, limite_bytes=1)  # 1a linha: arquivo novo
+    gravar_registro(registro, destino, limite_bytes=1)  # cheio -> rotaciona
+    gravar_registro(registro, destino, limite_bytes=1)  # cheio de novo -> substitui o .1
+
+    anterior = tmp_path / "obs.1.jsonl"
+    assert destino.exists() and anterior.exists()
+    assert len(destino.read_text(encoding="utf-8").splitlines()) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["obs.1.jsonl", "obs.jsonl"]  # no maximo 2
+
+
+def test_sem_rotacao_abaixo_do_limite(tmp_path):
+    destino = tmp_path / "obs.jsonl"
+    registro = construir_registro({"modelo": "m", "categoria": "sucesso"}, 0, 0.1, stdout="{}", stderr="")
+    gravar_registro(registro, destino)
+    gravar_registro(registro, destino)
+    assert len(destino.read_text(encoding="utf-8").splitlines()) == 2
+    assert not (tmp_path / "obs.1.jsonl").exists()
+    assert LIMITE_ARQUIVO_BYTES == 1024 * 1024
+
+
+def test_falha_na_rotacao_nao_altera_o_resultado(tmp_path, monkeypatch):
+    destino = tmp_path / "obs.jsonl"
+    destino.write_text("x" * 10, encoding="utf-8")
+
+    def _falha(*_a, **_k):
+        raise OSError("falha simulada")
+
+    monkeypatch.setattr(observabilidade.os, "replace", _falha)
+    registro = construir_registro({"modelo": "m", "categoria": "sucesso"}, 0, 0.1, stdout="{}", stderr="")
+    gravado = gravar_registro(registro, destino, limite_bytes=1)
+    assert gravado["log_gravado"] is False
+    assert gravado["tipo_erro_log"] == "OSError"
+    assert "falha simulada" not in json.dumps(gravado)
