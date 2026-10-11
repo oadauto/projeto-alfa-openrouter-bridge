@@ -60,7 +60,7 @@ import sys
 import time
 from pathlib import Path
 
-from observabilidade import construir_registro, gravar_registro
+from observabilidade import LogPathInvalido, construir_registro, gravar_registro, validar_caminho_log
 
 ADAPTADOR = Path(__file__).resolve().parent / "adaptador_harness.py"
 
@@ -211,17 +211,42 @@ def invocar_adaptador_observado(
     return saida, codigo_saida, registro
 
 
+RAIZ_LOGS = Path(__file__).resolve().parent.parent / "logs"
+
+
 def _ler_log_path(argv: list[str]):
-    """Fase 5: lê `--log CAMINHO` (opt-in). Qualquer outro argumento é
-    ignorado, como antes. Sem `--log`, nada é gravado em disco."""
-    if "--log" in argv:
-        indice = argv.index("--log")
-        if indice + 1 < len(argv):
-            return argv[indice + 1]
-    return None
+    """Fase 5.2: lê e valida `--log CAMINHO` (opt-in).
+
+    Sem `--log`, devolve None (nada é gravado). Com `--log`, o valor é
+    obrigatório, não pode começar com `--` e deve passar por
+    `validar_caminho_log` (dentro de `logs/`, sufixo `.jsonl`). Qualquer falha
+    levanta `LogPathInvalido`, sem expor o caminho informado.
+    """
+    if "--log" not in argv:
+        return None
+    indice = argv.index("--log")
+    if indice + 1 >= len(argv) or argv[indice + 1].startswith("--"):
+        raise LogPathInvalido("valor ausente")
+    return validar_caminho_log(argv[indice + 1], RAIZ_LOGS)
 
 
 def main() -> int:
+    # Fase 5.2: argumento --log inválido ou ausente é erro explícito, antes de
+    # ler a entrada e sem executar o harness. A mensagem é fixa (não ecoa o
+    # caminho informado).
+    try:
+        log_path = _ler_log_path(sys.argv[1:])
+    except LogPathInvalido:
+        print(
+            json.dumps(
+                {
+                    "erro": "argumento --log invalido ou ausente (use um caminho .jsonl dentro de logs/).",
+                    "tipo_erro": "LogPathInvalido",
+                }
+            )
+        )
+        return 2
+
     bruto = sys.stdin.read()
 
     try:
@@ -234,7 +259,6 @@ def main() -> int:
     # aqui (fora do que invocar_adaptador já trata) produz JSON estruturado
     # em stdout, nunca um traceback bruto e nunca stdout vazio.
     try:
-        log_path = _ler_log_path(sys.argv[1:])
         if log_path is None:
             saida, codigo_saida = invocar_adaptador(entrada)
         else:

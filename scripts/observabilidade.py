@@ -25,17 +25,32 @@ Princípios (herdados das Fases 4A-4H e da governança do Projeto ALFA):
   nunca altera o resultado da chamada ao harness, nem o código de saída, nem
   o stdout do cliente. Não há retry nem caminho alternativo de gravação.
 - Sem rede, sem credencial, sem chamada ao OpenRouter.
+
+Fase 5.2:
+
+- **Mensagens livres de erro nunca são gravadas.** O campo `erro` recebe
+  sempre o texto fixo `MENSAGEM_ERRO_OMITIDA`; o diagnóstico fica em
+  `tipo_erro` (nome do tipo, curto e saneado).
+- **Rotação simples.** Ao atingir `LIMITE_ARQUIVO_BYTES`, o log atual vira
+  `NOME.1.jsonl` (substituindo um `.1` anterior) e um novo arquivo começa:
+  no máximo dois arquivos por log. Nada é apagado fora disso.
+- **Validação de caminho** (`validar_caminho_log`): o caminho de log deve
+  resolver para dentro da pasta `logs/` do repositório e terminar em `.jsonl`.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA_VERSAO = 1
-LIMITE_TRECHO_CARACTERES = 500
+LIMITE_TRECHO_CARACTERES = 200
+LIMITE_ARQUIVO_BYTES = 1024 * 1024  # 1 MiB por arquivo de log
+MENSAGEM_ERRO_OMITIDA = "mensagem omitida"
+SUFIXO_LOG = ".jsonl"
 MARCADOR_REDACAO = "[REDACTED]"
 
 # Ordem importa: padrões mais específicos primeiro.
@@ -118,7 +133,8 @@ def construir_registro(
         "fallback_utilizado": saida.get("fallback_utilizado"),
         "origem_erro": saida.get("origem_erro"),
         "tipo_erro": saida.get("tipo_erro"),
-        "erro": sanitizar_texto(saida.get("erro")) if eh_erro else None,
+        # Fase 5.2: mensagens livres de erro nunca vão para o registro.
+        "erro": MENSAGEM_ERRO_OMITIDA if eh_erro else None,
         "stdout_bytes": _tamanho(stdout),
         "stderr_bytes": _tamanho(stderr),
         "stderr_trecho": sanitizar_texto(stderr),
@@ -135,7 +151,36 @@ def construir_registro(
     return registro
 
 
-def gravar_registro(registro: dict, caminho) -> dict:
+class LogPathInvalido(ValueError):
+    """Caminho de log recusado por `validar_caminho_log`."""
+
+
+def validar_caminho_log(caminho, raiz_logs) -> Path:
+    """Devolve o caminho absoluto e resolvido do log, ou levanta
+    `LogPathInvalido`.
+
+    Regras: valor não vazio; sufixo `.jsonl`; o caminho resolvido (absoluto,
+    sem `..` nem links) deve ficar dentro de `raiz_logs` (e não ser a própria
+    pasta). Relativo é resolvido a partir do diretório atual.
+    """
+    if caminho is None or not isinstance(caminho, (str, os.PathLike)) or not str(caminho).strip():
+        raise LogPathInvalido("caminho ausente")
+    destino = Path(caminho).resolve()
+    raiz = Path(raiz_logs).resolve()
+    if destino.suffix.lower() != SUFIXO_LOG:
+        raise LogPathInvalido("sufixo")
+    if raiz not in destino.parents:
+        raise LogPathInvalido("fora da pasta de logs")
+    return destino
+
+
+def _rotacionar_se_necessario(destino: Path, limite_bytes: int) -> None:
+    if destino.exists() and destino.stat().st_size >= limite_bytes:
+        anterior = destino.with_name(f"{destino.stem}.1{destino.suffix}")
+        os.replace(destino, anterior)
+
+
+def gravar_registro(registro: dict, caminho, limite_bytes: int = LIMITE_ARQUIVO_BYTES) -> dict:
     """Acrescenta `registro` (uma linha JSON) ao arquivo `caminho`.
 
     Nunca levanta exceção: em caso de falha, devolve o registro com
@@ -146,6 +191,7 @@ def gravar_registro(registro: dict, caminho) -> dict:
     try:
         destino = Path(caminho)
         destino.parent.mkdir(parents=True, exist_ok=True)
+        _rotacionar_se_necessario(destino, limite_bytes)
         registro_gravado = dict(registro)
         registro_gravado["log_gravado"] = True
         registro_gravado["tipo_erro_log"] = None
