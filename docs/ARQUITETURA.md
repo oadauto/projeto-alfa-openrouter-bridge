@@ -95,6 +95,53 @@ provedor do mesmo modelo sem decisão humana. Adicionalmente, o módulo não
 implementa retry nem troca de modelo em caso de falha — se a chamada
 falhar, apenas informa o resultado e para.
 
+## Continuidade controlada (`continuidade.py`)
+
+Camada que OFERECE o OpenRouter quando Claude ou ChatGPT estao no limite ou
+indisponiveis. Complementa o componente 1 (detector de falha) sem
+automatiza-lo: o estado do servico e informado por uma fonte autorizada
+(`FONTES_AUTORIZADAS`); o modulo nao detecta nem calcula cota.
+
+```
+SinalServico (fonte autorizada informa o estado)
+        |
+        v
+estado_efetivo()  -- fonte/servico/estado invalido --> desconhecido (sem oferta)
+        |
+        +-- disponivel / limite_proximo / desconhecido --> nenhuma oferta, nenhuma chamada
+        |
+        +-- limite_atingido / indisponivel
+                |
+                v
+        montar_oferta()  (servico, motivo, modelo, custo estimado - so texto)
+                |
+                v
+        confirmar_tripla()  servico -> modelo -> "AUTORIZO"  (qualquer falha cancela)
+                |
+                v
+        executor_real.executar_chamada_real()   UMA chamada, allow_fallbacks=false
+                |
+                v
+        registro seguro (lista branca) - 200/429/5xx/desconhecido sao resultado final
+```
+
+Por que nao ha fallback silencioso: nenhuma chamada ocorre sem as tres
+confirmacoes; nao ha retry; nao ha troca de modelo; e o caminho NAO passa por
+`orquestrador.orquestrar()`, cujo laco de candidatos pode avancar para outro
+modelo apos 429/5xx (com nova confirmacao a cada passo). Aqui o limite e uma
+unica chamada por autorizacao.
+
+Sinal x erro do OpenRouter: o sinal de indisponibilidade do Claude/ChatGPT e
+entrada (`fonte_sinal`); HTTP 429/5xx e resultado da chamada ao OpenRouter
+(`origem_resultado`, `status_http`). Campos separados no registro.
+
+Custo: lido do `pricing` do catalogo; `gratuito` so com prompt e completion
+iguais a zero; preco ausente ou ilegivel resulta em `indisponivel`. Um modelo
+pago e mostrado como tal na oferta, e a confirmacao tripla vale para ele.
+
+Integracao futura com o adaptador JSON (`adaptador_harness.py`) e com o
+cliente local: fora deste ticket, exige ticket e autorizacao proprios.
+
 ## Limitações conhecidas desta versão
 
 - `credencial.py` depende do Windows Credential Manager — não é portável
@@ -102,4 +149,6 @@ falhar, apenas informa o resultado e para.
 - `contexto.py` não lê o Notion diretamente — recebe um resumo já pronto.
 - Não há detecção automática de falha nos agentes principais — a decisão
   de acionar esta camada continua sendo do orquestrador (Claude/Cowork).
+  A continuidade controlada (`continuidade.py`) só OFERECE o OpenRouter a
+  partir de um sinal informado por fonte autorizada.
 - Não há compatibilidade MCP nem conexão com ChatGPT nesta versão.
