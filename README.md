@@ -63,6 +63,41 @@ Sem essa dupla confirmação, nenhuma chamada é feita. O executor real:
 - `tests/test_seguranca_logs.py` varre as saídas geradas nos testes e falha
   caso encontre qualquer padrão de chave/segredo.
 
+## Continuidade controlada (Claude/ChatGPT -> OpenRouter)
+
+`src/ponte_openrouter/continuidade.py` oferece o OpenRouter como alternativa
+quando Claude ou ChatGPT estao no limite ou indisponiveis. Nunca troca
+silenciosamente.
+
+- **Quando e oferecido:** somente se uma FONTE AUTORIZADA informar o estado
+  `limite_atingido` ou `indisponivel` para `claude` ou `chatgpt`
+  (`SinalServico`). `disponivel`, `limite_proximo` e `desconhecido` nunca
+  geram oferta nem chamada. Sinal com fonte, servico ou estado fora dos
+  conjuntos fechados vira `desconhecido`. O modulo nao calcula percentuais
+  nem detecta cota: quem informa e a fonte.
+- **Sinal x erro do OpenRouter:** o sinal de indisponibilidade do
+  Claude/ChatGPT e uma ENTRADA (`fonte_sinal`). Um HTTP 429/5xx e o RESULTADO
+  de uma chamada ao OpenRouter (`origem_resultado="openrouter"`,
+  `status_http`). Sao registrados em campos separados e nunca se misturam.
+- **Oferta:** servico afetado, motivo (vocabulario fechado), modelo e custo
+  estimado (`gratuito`, `pago (...)` ou `indisponivel` quando o preco do
+  catalogo faltar ou for ilegivel - nunca inventado).
+- **Confirmacao tripla:** tres respostas separadas e exatas - nome do
+  servico, identificador do modelo e a palavra `AUTORIZO`. Ausente,
+  divergente ou invalida em qualquer uma cancela tudo; nao existe confirmacao
+  unica implicita.
+- **Uma chamada, sem retry:** `executar_oferta_confirmada()` chama
+  diretamente `executor_real.executar_chamada_real()` no maximo uma vez
+  (`allow_fallbacks: false`). Nao usa `orquestrar()` (cujo laco pode avancar
+  para outros candidatos), nao repete e nao troca de modelo. 200, 429, 5xx e
+  codigos desconhecidos sao resultado final.
+- **Registro seguro:** lista branca; nunca token, credencial, prompt,
+  resposta (apenas o comprimento) nem mensagem livre de erro.
+- **Fora deste ticket:** ligacao ao adaptador JSON / cliente local e gravacao
+  do registro em `logs/` (exigem ticket e autorizacao proprios).
+
+Ver `docs/ARQUITETURA.md`.
+
 ## Observabilidade (Fase 5 / 5.2)
 
 O cliente harness local aceita `--log logs\ARQUIVO.jsonl` (opt-in) para
