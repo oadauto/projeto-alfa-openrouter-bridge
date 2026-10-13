@@ -17,8 +17,13 @@ Princípios (todos verificados em tests/test_continuidade.py):
    HTTP 429/5xx devolvido pelo OpenRouter (resultado de uma chamada). O
    registro mantém os dois separados (`fonte_sinal` x `origem_resultado`).
 4. Execução exige TRÊS confirmações separadas e exatas (serviço, modelo,
-   autorização). Ausente, divergente ou inválida em qualquer uma: cancela
-   tudo, sem chamada.
+   autorização), mais uma QUARTA (`ACEITO O CUSTO`) quando o modelo não é
+   comprovadamente gratuito. Ausente, divergente ou inválida em qualquer
+   uma: cancela tudo, sem chamada.
+   As respostas só valem se vierem de um leitor INTERATIVO (`leitor_interativo`:
+   terminal real, digitação direta). Respostas vindas de JSON, arquivo,
+   pipe ou qualquer callable não marcado como interativo são recusadas
+   antes de qualquer pergunta (`confirmacao_nao_interativa`).
 5. Exatamente UMA chamada, direto em `executor_real.executar_chamada_real`
    (que envia `provider.allow_fallbacks=false`). Sem retry, sem outro
    modelo, e SEM passar por `orquestrador.orquestrar()` (cujo laço pode
@@ -32,13 +37,19 @@ Este módulo não importa `requests`, `credencial`, `executor_real`,
 `orquestrador` nem rede no topo; `executor_real` só é importado dentro de
 `executar_oferta_confirmada`, depois das três confirmações.
 
-Fora de escopo (ticket futuro, com autorização): ligação ao adaptador JSON /
-cliente local; gravação do registro em `logs/` via observabilidade.
+Integração ao harness: `scripts/adaptador_harness.py` usa `montar_oferta_de_json`
+e `registro_oferta` (somente OFERTA, sem rede) e `registro_recusa_json` quando o
+JSON traz aprovações/respostas; ele NUNCA executa. A execução real acontece só
+em `scripts/cliente_harness_local.py --continuidade-interativa`, que lê as
+confirmações do terminal (`leitor_interativo`) e chama
+`executar_oferta_confirmada`. O registro em `logs/` é feito pela
+observabilidade existente (`scripts/observabilidade.py`), por lista branca.
 """
 
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -85,6 +96,8 @@ MOTIVOS = {
 CUSTO_INDISPONIVEL = "indisponível"
 
 RESPOSTA_AUTORIZACAO = "AUTORIZO"
+RESPOSTA_CUSTO = "ACEITO O CUSTO"
+CUSTO_GRATUITO = "gratuito"
 
 # Categorias do resultado (mesmo vocabulário de executor.classificar_http /
 # harness_contrato) + categorias próprias deste módulo.
@@ -145,6 +158,28 @@ def estado_efetivo(sinal: Any) -> str:
     if not _em(sinal.estado, ESTADOS):
         return ESTADO_DESCONHECIDO
     return sinal.estado
+
+
+def sinal_de_json(dado: Any) -> SinalServico:
+    """Converte o objeto JSON `sinal_servico` do adaptador em `SinalServico`.
+
+    Só lê as chaves `servico`, `estado`, `fonte` e `motivo`, e só aceita
+    strings: qualquer outra coisa vira vazio e, portanto, `desconhecido` em
+    `estado_efetivo`. Nunca levanta exceção e nunca ecoa o conteúdo recebido.
+    """
+    if not isinstance(dado, dict):
+        return SinalServico(servico="", estado="", fonte="")
+
+    def _texto(chave: str) -> str:
+        valor = dado.get(chave)
+        return valor if isinstance(valor, str) else ""
+
+    return SinalServico(
+        servico=_texto("servico"),
+        estado=_texto("estado"),
+        fonte=_texto("fonte"),
+        motivo=_texto("motivo") or "nao_informado",
+    )
 
 
 def estimar_custo(modelo_bruto: Any) -> str:
@@ -270,11 +305,14 @@ def confirmar_tripla(
     oferta: Oferta,
     obter_resposta: Callable[[str], str] | None = None,
 ) -> DecisaoContinuidade:
-    """Três confirmações separadas e exatas, nesta ordem:
+    """Três confirmações separadas e exatas, nesta ordem (quatro se o modelo
+    não for comprovadamente gratuito):
 
     1. nome do serviço afetado;
     2. identificador do modelo OpenRouter;
-    3. a palavra `AUTORIZO` (autorização da execução).
+    3. a palavra `AUTORIZO` (autorização da execução);
+    4. somente se `custo_estimado != "gratuito"` (pago ou indisponível):
+       `ACEITO O CUSTO` (autorização de custo, separada da execução).
 
     A primeira resposta ausente, divergente ou inválida cancela tudo; as
     perguntas seguintes nem chegam a ser feitas. Não existe confirmação
@@ -282,23 +320,32 @@ def confirmar_tripla(
     `input`.
     """
     pedir = obter_resposta or input
-    etapas = (
+    total = 3 if oferta.custo_estimado == CUSTO_GRATUITO else 4
+    etapas = [
         (
             "servico",
-            f"{oferta.texto}\n\n[1/3] Digite o nome do serviço afetado ('{oferta.servico}'): ",
+            f"{oferta.texto}\n\n[1/{total}] Digite o nome do serviço afetado ('{oferta.servico}'): ",
             lambda r: r.strip().lower() == oferta.servico.lower(),
         ),
         (
             "modelo",
-            f"[2/3] Digite exatamente o modelo OpenRouter ('{oferta.modelo_id}'): ",
+            f"[2/{total}] Digite exatamente o modelo OpenRouter ('{oferta.modelo_id}'): ",
             lambda r: r.strip() == oferta.modelo_id,
         ),
         (
             "execucao",
-            f"[3/3] Para autorizar UMA única chamada real, digite {RESPOSTA_AUTORIZACAO}: ",
+            f"[3/{total}] Para autorizar UMA única chamada real, digite {RESPOSTA_AUTORIZACAO}: ",
             lambda r: r.strip() == RESPOSTA_AUTORIZACAO,
         ),
-    )
+    ]
+    if total == 4:
+        etapas.append(
+            (
+                "custo",
+                f"[4/4] Custo estimado: {oferta.custo_estimado}. Para aceitar esse custo, digite {RESPOSTA_CUSTO}: ",
+                lambda r: r.strip() == RESPOSTA_CUSTO,
+            )
+        )
     for nome, pergunta, confere in etapas:
         try:
             resposta = pedir(pergunta)
@@ -308,7 +355,7 @@ def confirmar_tripla(
             return DecisaoContinuidade(False, f"resposta_invalida_{nome}")
         if not confere(resposta):
             return DecisaoContinuidade(False, f"confirmacao_divergente_{nome}")
-    return DecisaoContinuidade(True, "autorizado_nas_tres_confirmacoes")
+    return DecisaoContinuidade(True, "autorizado_nas_tres_confirmacoes" if total == 3 else "autorizado_nas_quatro_confirmacoes")
 
 
 def _registro(
@@ -352,12 +399,100 @@ def _registro(
     }
 
 
+def registro_oferta(oferta: Oferta) -> dict:
+    """Registro seguro da etapa de OFERTA (nada executado, nenhuma confirmação
+    pedida, nenhuma rede). Mesmos campos do registro de execução, mais o
+    texto da oferta, que só contém valores validados e texto fixo."""
+    _validar_oferta(oferta)
+    registro = _registro(
+        oferta,
+        autorizado=False,
+        motivo_decisao="aguardando_confirmacao",
+        categoria="nao_executado",
+        chamada_realizada=False,
+    )
+    registro["oferta_texto"] = oferta.texto
+    return registro
+
+
+class SemTerminalInterativoError(RuntimeError):
+    """Não há terminal real para digitação direta. Mensagem fixa."""
+
+
+def _abrir_terminal():
+    if os.name == "nt":
+        return open("CONIN$", "r"), open("CONOUT$", "w")
+    return open("/dev/tty", "r"), open("/dev/tty", "w")
+
+
+def leitor_interativo(abrir: Callable[[], Any] | None = None) -> Callable[[str], str]:
+    """Leitor de confirmações digitadas por uma PESSOA no terminal.
+
+    Lê do dispositivo de console (CONIN$ no Windows, /dev/tty no Unix), e não
+    de stdin: stdin pode ser um pipe/JSON controlado por script. Se não houver
+    terminal real (`isatty` falso nas duas pontas), levanta
+    `SemTerminalInterativoError`. O callable devolvido carrega a marca
+    `origem_interativa=True`, exigida por `executar_oferta_confirmada`.
+    `abrir` é injetável apenas para testes.
+    """
+    try:
+        entrada, saida = (abrir or _abrir_terminal)()
+        if not (entrada.isatty() and saida.isatty()):
+            raise SemTerminalInterativoError()
+    except Exception:  # noqa: BLE001 - nunca ecoar detalhes do sistema
+        raise SemTerminalInterativoError("Nenhum terminal interativo disponível.") from None
+
+    def _ler(pergunta: str) -> str:
+        saida.write(pergunta)
+        saida.flush()
+        linha = entrada.readline()
+        if linha == "":
+            raise EOFError
+        return linha.rstrip("\r\n")
+
+    _ler.origem_interativa = True  # type: ignore[attr-defined]
+    return _ler
+
+
+def montar_oferta_de_json(entrada_json: Any) -> Oferta | None:
+    """Oferta a partir do JSON do harness (`sinal_servico`,
+    `modelo_continuidade`, `modelos_brutos`). None se o sinal não permitir
+    oferta. ValueError (mensagem fixa) se faltar `modelo_continuidade`."""
+    if not isinstance(entrada_json, dict):
+        return None
+    sinal = sinal_de_json(entrada_json.get("sinal_servico"))
+    if estado_efetivo(sinal) not in ESTADOS_QUE_PERMITEM_OFERTA:
+        return None
+    modelo_id = entrada_json.get("modelo_continuidade")
+    if not isinstance(modelo_id, str) or not modelo_id.strip():
+        raise ValueError("'modelo_continuidade' é obrigatório quando há sinal de indisponibilidade.")
+    brutos = entrada_json.get("modelos_brutos")
+    modelo_bruto = next(
+        (m for m in (brutos if isinstance(brutos, list) else []) if isinstance(m, dict) and m.get("id") == modelo_id),
+        None,
+    )
+    return montar_oferta(sinal, modelo_id, modelo_bruto)
+
+
+def registro_recusa_json(oferta: Oferta) -> dict:
+    """Registro de recusa: o JSON trouxe aprovações/respostas, que não provam
+    confirmação humana. Nenhuma pergunta, nenhuma rede."""
+    _validar_oferta(oferta)
+    return _registro(
+        oferta,
+        autorizado=False,
+        motivo_decisao="confirmacao_apenas_por_json",
+        categoria=CATEGORIA_RECUSADO,
+        chamada_realizada=False,
+    )
+
+
 def executar_oferta_confirmada(
     oferta: Oferta,
     prompt: str,
     obter_resposta: Callable[[str], str] | None = None,
 ) -> dict:
-    """Fluxo real da continuidade: confirmação tripla -> UMA chamada direta
+    """Fluxo real da continuidade: confirmação interativa (3 ou 4 respostas) -> UMA chamada direta
     a `executor_real` -> registro seguro.
 
     Não chama `orquestrar()`, não tenta outro modelo, não faz retry. O
@@ -368,6 +503,22 @@ def executar_oferta_confirmada(
     _validar_oferta(oferta)
     # Valida antes de pedir qualquer confirmação (ValueError com mensagem fixa).
     contexto = contexto_mod.montar_contexto_minimo(prompt if isinstance(prompt, str) else "")
+
+    if obter_resposta is None:
+        try:
+            obter_resposta = leitor_interativo()
+        except SemTerminalInterativoError:
+            return _registro(
+                oferta, autorizado=False, motivo_decisao="sem_terminal_interativo",
+                categoria=CATEGORIA_RECUSADO, chamada_realizada=False,
+            )
+    if getattr(obter_resposta, "origem_interativa", False) is not True:
+        # Respostas pré-gravadas (JSON, arquivo, pipe, lista) não provam
+        # confirmação humana: recusa antes de qualquer pergunta.
+        return _registro(
+            oferta, autorizado=False, motivo_decisao="confirmacao_nao_interativa",
+            categoria=CATEGORIA_RECUSADO, chamada_realizada=False,
+        )
 
     decisao = confirmar_tripla(oferta, obter_resposta)
     if not decisao.autorizado:

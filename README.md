@@ -82,10 +82,14 @@ silenciosamente.
 - **Oferta:** servico afetado, motivo (vocabulario fechado), modelo e custo
   estimado (`gratuito`, `pago (...)` ou `indisponivel` quando o preco do
   catalogo faltar ou for ilegivel - nunca inventado).
-- **Confirmacao tripla:** tres respostas separadas e exatas - nome do
-  servico, identificador do modelo e a palavra `AUTORIZO`. Ausente,
-  divergente ou invalida em qualquer uma cancela tudo; nao existe confirmacao
-  unica implicita.
+- **Confirmacao interativa:** tres respostas separadas e exatas - nome do
+  servico, identificador do modelo e a palavra `AUTORIZO` - mais uma quarta,
+  `ACEITO O CUSTO`, quando o modelo nao e comprovadamente gratuito (pago ou
+  custo indisponivel). Ausente, divergente ou invalida em qualquer uma cancela
+  tudo; nao existe confirmacao unica implicita. As respostas so valem se
+  digitadas por uma pessoa no terminal (`leitor_interativo`); respostas
+  vindas de JSON, arquivo, pipe ou lista sao recusadas antes de qualquer
+  pergunta.
 - **Uma chamada, sem retry:** `executar_oferta_confirmada()` chama
   diretamente `executor_real.executar_chamada_real()` no maximo uma vez
   (`allow_fallbacks: false`). Nao usa `orquestrar()` (cujo laco pode avancar
@@ -93,8 +97,23 @@ silenciosamente.
   codigos desconhecidos sao resultado final.
 - **Registro seguro:** lista branca; nunca token, credencial, prompt,
   resposta (apenas o comprimento) nem mensagem livre de erro.
-- **Fora deste ticket:** ligacao ao adaptador JSON / cliente local e gravacao
-  do registro em `logs/` (exigem ticket e autorizacao proprios).
+- **Integração ao harness (adaptador JSON):** `scripts/adaptador_harness.py`
+  aceita, de forma opcional, `sinal_servico` e `modelo_continuidade`. Só
+  quando o sinal é ofertável (`limite_atingido`/`indisponivel` de fonte
+  autorizada) a rota de continuidade entra em ação; em qualquer outro caso
+  (sem sinal, `disponivel`, `limite_proximo`, `desconhecido`, fonte não
+  autorizada) o fluxo anterior roda inalterado e a saída segue sendo a de 8
+  campos. O adaptador JSON NUNCA executa: só devolve a oferta. Se o JSON
+  trouxer `aprovado_por_humano`, `confirmo_modo_real` ou respostas de
+  autorizacao, isso e tratado como recusa (`recusado_json`), pois qualquer
+  script consegue preencher esses campos. O `modo: real` antigo tambem esta
+  bloqueado no adaptador (`AprovacaoAusenteError`, sempre, mesmo com
+  aprovacoes no JSON), entao a unica via de chamada real pelo harness e
+  a interativa. A execucao real so ocorre em
+  `py scripts\cliente_harness_local.py --continuidade-interativa`, com as
+  confirmacoes digitadas no terminal por uma pessoa; sem terminal real, recusa.
+  Com `--log`, o registro vai para `logs/` por lista branca (ver
+  `docs/fase5-observabilidade.md`).
 
 Ver `docs/ARQUITETURA.md`.
 

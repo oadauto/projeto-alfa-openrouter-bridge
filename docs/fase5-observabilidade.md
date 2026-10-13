@@ -32,6 +32,18 @@ py scripts\cliente_harness_local.py --log logs\harness_observabilidade.jsonl < e
 `stdout_bytes`, `stderr_bytes`, `stderr_trecho`, `resposta_caracteres`,
 `log_gravado`, `tipo_erro_log`.
 
+Quando a saida do harness traz o objeto `continuidade` (rota de continuidade
+controlada), o registro ganha tambem o objeto `continuidade`, por lista
+branca: `etapa`, `servico_afetado`, `estado_servico`, `fonte_sinal`, `motivo`,
+`modelo`, `custo_estimado`, `motivo_decisao`, `origem_resultado`, `categoria`,
+`tipo_erro`, `autorizado`, `chamada_realizada`, `retry`, `troca_de_modelo`,
+`fallback_utilizado`, `numero_chamadas`, `status_http` e `resposta_caracteres`.
+Os campos de topo `modelo`, `categoria`, `status_http`, `numero_tentativas`,
+`fallback_utilizado`, `origem_erro`, `tipo_erro` e `resposta_caracteres`
+sao preenchidos a partir dele. Nunca entram o texto da oferta, mensagens, o
+prompt, a resposta ou credenciais. Sem esse objeto, o registro e identico ao
+das fases anteriores.
+
 ## O que nunca e gravado
 
 - A resposta do modelo (so o comprimento, em `resposta_caracteres`).

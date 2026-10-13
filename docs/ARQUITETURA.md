@@ -116,7 +116,8 @@ estado_efetivo()  -- fonte/servico/estado invalido --> desconhecido (sem oferta)
         montar_oferta()  (servico, motivo, modelo, custo estimado - so texto)
                 |
                 v
-        confirmar_tripla()  servico -> modelo -> "AUTORIZO"  (qualquer falha cancela)
+        confirmar_tripla()  servico -> modelo -> "AUTORIZO" (+ "ACEITO O CUSTO" se nao gratuito)
+                            digitadas no terminal (leitor_interativo); qualquer falha cancela
                 |
                 v
         executor_real.executar_chamada_real()   UMA chamada, allow_fallbacks=false
@@ -137,10 +138,52 @@ entrada (`fonte_sinal`); HTTP 429/5xx e resultado da chamada ao OpenRouter
 
 Custo: lido do `pricing` do catalogo; `gratuito` so com prompt e completion
 iguais a zero; preco ausente ou ilegivel resulta em `indisponivel`. Um modelo
-pago e mostrado como tal na oferta, e a confirmacao tripla vale para ele.
+pago (ou de custo indisponivel) e mostrado como tal na oferta e exige uma
+quarta confirmacao, separada da autorizacao de execucao: `ACEITO O CUSTO`.
 
-Integracao futura com o adaptador JSON (`adaptador_harness.py`) e com o
-cliente local: fora deste ticket, exige ticket e autorizacao proprios.
+### Integração ao harness (adaptador JSON)
+
+`scripts/adaptador_harness.py` ganhou a rota `_processar_continuidade`,
+acionada somente se a entrada trouxer `sinal_servico` com estado efetivo
+`limite_atingido` ou `indisponivel` (fonte autorizada). Nos demais casos ela
+devolve `None` e o fluxo anterior (dry-run/real via `executar_via_contrato`)
+roda sem nenhuma alteração.
+
+```
+entrada JSON (stdin)
+   |
+   +-- sem sinal / disponivel / limite_proximo / desconhecido --> fluxo anterior (8 campos)
+   |
+   +-- limite_atingido / indisponivel
+          |
+          +-- adaptador JSON --> OFERTA (nada executado, sem rede)
+          |      (aprovações/respostas no JSON --> RECUSA "recusado_json")
+          |
+          +-- cliente --continuidade-interativa --> confirmação digitada no terminal
+                 |-- sem terminal real / divergente --> recusado (nenhuma chamada)
+                 |-- ok ------> UMA chamada em executor_real (allow_fallbacks=false)
+                                200/429/5xx/desconhecido = resultado final
+```
+
+A saída da rota é `{"continuidade": {...}}`, por lista branca. Com `--log`, o
+cliente local grava o registro em `logs/` via `observabilidade.py`, que
+copia apenas os campos permitidos do objeto `continuidade` (sem
+`oferta_texto`, mensagens, prompt, resposta ou credenciais). A rota não passa
+por `orquestrar()`. O campo `modo` é ignorado nela. JSON
+não prova confirmação humana: o adaptador não aceita `aprovado_por_humano`,
+`confirmo_modo_real` nem `respostas_humanas` como autorização, e o `modo:
+real` antigo do adaptador é bloqueado incondicionalmente
+(`AprovacaoAusenteError`): não existe caminho de chamada real pelo harness
+que dispense a confirmação digitada no terminal. (Fora do harness continuam
+existindo chamadas diretas em Python às bibliotecas e scripts locais, como
+`executar_orquestrador.py`, que têm confirmação própria e não foram
+tocadas.) A confirmação
+é lida do console (CONIN$ no Windows, /dev/tty no Unix) pelo cliente, e não
+de stdin; sem terminal real a execução é recusada. Limite conhecido: isto
+impede o preenchimento por JSON/pipe, mas não impede, por si só, um processo
+que controle o próprio console (ex.: automação de teclado) de digitar as
+respostas; esse risco só se controla por processo (nunca delegar a digitação
+a Claude/Codex).
 
 ## Limitações conhecidas desta versão
 

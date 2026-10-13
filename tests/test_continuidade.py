@@ -40,6 +40,7 @@ def _respostas(*valores):
         return fila.pop(0)
 
     _obter.perguntas = perguntas
+    _obter.origem_interativa = True  # simula leitor_interativo (terminal real)
     return _obter
 
 
@@ -165,7 +166,7 @@ def test_5xx_e_codigo_desconhecido_nao_trocam_de_modelo(codigo, categoria):
 
 # 8. segredo não aparece na saída nem no registro
 def test_segredo_nao_aparece_na_saida_nem_no_registro(capsys):
-    oferta = c.montar_oferta(_sinal(motivo=SEGREDO), MODELO)  # motivo livre é descartado
+    oferta = c.montar_oferta(_sinal(motivo=SEGREDO), MODELO, {"id": MODELO, "pricing": {"prompt": "0", "completion": "0"}})  # motivo livre é descartado
     assert SEGREDO not in oferta.texto
 
     resultado = _real(200, "sucesso", texto=f"resposta com {SEGREDO}", mensagem=f"Bearer {SEGREDO}")
@@ -207,3 +208,91 @@ def test_oferta_forjada_e_rejeitada_sem_perguntar_nem_chamar(campo, valor):
     chamada.assert_not_called()
     assert obter.perguntas == []
     assert SEGREDO not in str(erro.value)
+
+
+# 10. Respostas pré-gravadas (JSON/lista/pipe) não são confirmação humana: recusa antes de perguntar
+def test_respostas_nao_interativas_sao_recusadas_sem_perguntar_nem_chamar():
+    fila = ["claude", MODELO, "AUTORIZO"]
+    perguntas = []
+
+    def pre_gravado(pergunta):
+        perguntas.append(pergunta)
+        return fila.pop(0)
+
+    with patch(ALVO) as chamada:
+        registro = c.executar_oferta_confirmada(_oferta(), "contexto mínimo", pre_gravado)
+    chamada.assert_not_called()
+    assert perguntas == []
+    assert registro["autorizado"] is False and registro["numero_chamadas"] == 0
+    assert registro["motivo_decisao"] == "confirmacao_nao_interativa"
+    assert registro["categoria"] == "recusado_pelo_humano"
+
+
+# 11. Sem terminal real (sem leitor), recusa; com terminal falso mas tty, funciona
+class _Falso:
+    def __init__(self, tty, linhas=()):
+        self._tty, self._linhas, self.escrito = tty, list(linhas), []
+
+    def isatty(self):
+        return self._tty
+
+    def readline(self):
+        return self._linhas.pop(0) + "\n" if self._linhas else ""
+
+    def write(self, t):
+        self.escrito.append(t)
+
+    def flush(self):
+        pass
+
+
+def test_leitor_interativo_exige_terminal_real():
+    with pytest.raises(c.SemTerminalInterativoError):
+        c.leitor_interativo(lambda: (_Falso(False), _Falso(False)))
+    with pytest.raises(c.SemTerminalInterativoError):
+        c.leitor_interativo(lambda: (_ for _ in ()).throw(OSError("detalhe do sistema")))
+    leitor = c.leitor_interativo(lambda: (_Falso(True, ["abc"]), _Falso(True)))
+    assert leitor.origem_interativa is True and leitor("pergunta") == "abc"
+    with pytest.raises(EOFError):
+        leitor("outra")
+
+
+def test_sem_leitor_e_sem_terminal_recusa_sem_chamada():
+    with patch(ALVO) as chamada, patch.object(c, "_abrir_terminal", side_effect=OSError):
+        registro = c.executar_oferta_confirmada(_oferta(), "contexto mínimo")
+    chamada.assert_not_called()
+    assert registro["motivo_decisao"] == "sem_terminal_interativo" and registro["numero_chamadas"] == 0
+
+
+# 12. Modelo pago (ou custo indisponível) exige QUARTA confirmação, separada da execução
+PAGO = {"id": MODELO, "pricing": {"prompt": "0.000001", "completion": "0.000002"}}
+
+
+def test_modelo_pago_exige_quarta_confirmacao_de_custo():
+    oferta = c.montar_oferta(_sinal(), MODELO, PAGO)
+    assert oferta.custo_estimado.startswith("pago")
+    # sem a 4ª: recusa, sem chamada
+    with patch(ALVO) as chamada:
+        r = c.executar_oferta_confirmada(oferta, "contexto mínimo", _tripla())
+    chamada.assert_not_called()
+    assert r["autorizado"] is False and r["motivo_decisao"] == "resposta_ausente_custo"
+    # 4ª errada
+    with patch(ALVO) as chamada:
+        r = c.executar_oferta_confirmada(oferta, "contexto mínimo", _respostas("claude", MODELO, "AUTORIZO", "AUTORIZO"))
+    chamada.assert_not_called()
+    assert r["motivo_decisao"] == "confirmacao_divergente_custo"
+    # 4ª correta: exatamente uma chamada
+    obter = _respostas("claude", MODELO, "AUTORIZO", "ACEITO O CUSTO")
+    with patch(ALVO, return_value=_real(200, "sucesso", "ok")) as chamada:
+        r = c.executar_oferta_confirmada(oferta, "contexto mínimo", obter)
+    assert chamada.call_count == 1 and len(obter.perguntas) == 4 and r["autorizado"] is True
+    # custo indisponível também conta como não gratuito
+    sem_preco = c.montar_oferta(_sinal(), MODELO, {"id": MODELO})
+    with patch(ALVO) as chamada:
+        r = c.executar_oferta_confirmada(sem_preco, "contexto mínimo", _tripla())
+    chamada.assert_not_called()
+    # gratuito continua com 3
+    obter = _tripla()
+    with patch(ALVO, return_value=_real(200, "sucesso", "ok")):
+        c.executar_oferta_confirmada(_oferta(), "contexto mínimo", obter)
+    assert len(obter.perguntas) == 3
