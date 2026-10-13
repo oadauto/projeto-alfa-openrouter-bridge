@@ -1,0 +1,52 @@
+name: CI
+
+# Valida cada PR para main (e a própria main após o merge).
+# Sem segredos: este workflow não referencia `secrets.*`, não usa
+# `pull_request_target` e não faz nenhuma chamada ao OpenRouter. Se algum
+# teste tentasse chamar a rede ou ler credencial, falharia - não existe
+# credencial no runner. Ver docs/ci-e-secret-scanning.md.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  testes:
+    name: testes (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Instalar dependências do projeto
+        run: python -m pip install -r requirements.txt
+
+      # Sem `-s`, `-v` ou `--showlocals`; `--show-capture=no` impede que
+      # stdout/stderr/logs capturados de um teste que falhou sejam impressos.
+      # Nenhum passo imprime variáveis de ambiente nem conteúdo de logs/.
+      - name: Suíte de testes
+        run: python -m pytest tests -q --tb=short --show-capture=no -p no:cacheprovider

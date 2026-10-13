@@ -2,4 +2,6 @@
 *.pyc
 .pytest_cache/
 logs/*.jsonl
-catalogo.json
+catalogo*.json
+.env
+.env.*
