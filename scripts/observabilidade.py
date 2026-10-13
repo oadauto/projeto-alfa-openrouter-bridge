@@ -53,6 +53,19 @@ MENSAGEM_ERRO_OMITIDA = "mensagem omitida"
 SUFIXO_LOG = ".jsonl"
 MARCADOR_REDACAO = "[REDACTED]"
 
+# Continuidade controlada (OpenRouter): lista branca dos campos do objeto
+# `continuidade` do adaptador que podem ir para o registro. Nunca entram
+# `oferta_texto`, `mensagem`, prompt, resposta ou qualquer texto livre.
+CAMPOS_CONTINUIDADE_TEXTO = (
+    "etapa", "servico_afetado", "estado_servico", "fonte_sinal", "motivo",
+    "modelo", "custo_estimado", "motivo_decisao", "origem_resultado",
+    "categoria", "tipo_erro",
+)
+CAMPOS_CONTINUIDADE_BOOL = (
+    "autorizado", "chamada_realizada", "retry", "troca_de_modelo", "fallback_utilizado",
+)
+CAMPOS_CONTINUIDADE_INT = ("numero_chamadas", "status_http", "resposta_caracteres")
+
 # Ordem importa: padrões mais específicos primeiro.
 _PADROES_SEGREDO: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]{6,}=*"), f"Bearer {MARCADOR_REDACAO}"),
@@ -142,6 +155,20 @@ def construir_registro(
         "log_gravado": False,
         "tipo_erro_log": None,
     }
+    # Continuidade controlada: só quando a saída trouxe o objeto `continuidade`
+    # (o registro das demais chamadas permanece exatamente como antes).
+    continuidade = saida.get("continuidade")
+    if isinstance(continuidade, dict):
+        extraido = _extrair_continuidade(continuidade)
+        registro["continuidade"] = extraido
+        registro["modelo"] = extraido["modelo"]
+        registro["categoria"] = extraido["categoria"]
+        registro["status_http"] = extraido["status_http"]
+        registro["numero_tentativas"] = extraido["numero_chamadas"]
+        registro["fallback_utilizado"] = extraido["fallback_utilizado"]
+        registro["origem_erro"] = extraido["origem_resultado"]
+        registro["tipo_erro"] = extraido["tipo_erro"]
+        registro["resposta_caracteres"] = extraido["resposta_caracteres"]
     # Campos de texto livre vindos de `saida` que não passaram pelo
     # saneamento acima (modelo, categoria, origem_erro, tipo_erro) são
     # tratados como strings curtas e também saneados por segurança.
@@ -149,6 +176,22 @@ def construir_registro(
         if isinstance(registro[campo], str):
             registro[campo] = sanitizar_texto(registro[campo], limite=200)
     return registro
+
+
+def _extrair_continuidade(continuidade: dict) -> dict:
+    """Copia, por lista branca e com tipo verificado, os campos permitidos do
+    objeto `continuidade`. Textos passam por `sanitizar_texto`."""
+    extraido: dict = {}
+    for campo in CAMPOS_CONTINUIDADE_TEXTO:
+        valor = continuidade.get(campo)
+        extraido[campo] = sanitizar_texto(valor, limite=200) if isinstance(valor, str) else None
+    for campo in CAMPOS_CONTINUIDADE_BOOL:
+        valor = continuidade.get(campo)
+        extraido[campo] = valor if isinstance(valor, bool) else None
+    for campo in CAMPOS_CONTINUIDADE_INT:
+        valor = continuidade.get(campo)
+        extraido[campo] = valor if isinstance(valor, int) and not isinstance(valor, bool) else None
+    return extraido
 
 
 class LogPathInvalido(ValueError):

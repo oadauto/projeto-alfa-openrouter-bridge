@@ -42,6 +42,17 @@ qualquer segredo (ver `observabilidade.py`). Sem `--log`/`log_path`, nada é
 gravado e o comportamento é idêntico ao da Fase 4E. O stdout do script
 continua contendo somente o resultado do harness.
 
+## Continuidade controlada OpenRouter: confirmação humana interativa
+
+`--continuidade-interativa` é o ÚNICO caminho que executa a continuidade
+Claude/ChatGPT -> OpenRouter. O JSON (stdin) só descreve a situação
+(`sinal_servico`, `modelo_continuidade`, `modelos_brutos`, `prompt_ficticio`);
+aprovações e respostas contidas nele são ignoradas. As confirmações (serviço,
+modelo, `AUTORIZO` e, para modelo não comprovadamente gratuito,
+`ACEITO O CUSTO`) são lidas do TERMINAL (CONIN$ / /dev/tty), digitadas por uma
+pessoa. Sem terminal real: recusa, sem chamada. Uma única chamada, com
+`allow_fallbacks: false`, sem retry. O adaptador por JSON nunca executa.
+
 ## Uso como script (stdin/stdout, espelha o adaptador)
 
     py scripts\\cliente_harness_local.py < entrada.json
@@ -212,6 +223,44 @@ def invocar_adaptador_observado(
 
 
 RAIZ_LOGS = Path(__file__).resolve().parent.parent / "logs"
+RAIZ_SRC = Path(__file__).resolve().parent.parent / "src"
+
+
+def executar_continuidade_interativa(entrada, leitor=None, log_path=None) -> tuple[dict, int]:
+    """Executa a continuidade com confirmação digitada por uma pessoa.
+
+    `leitor` (injetável só em testes) deve ser um leitor interativo marcado
+    por `continuidade.leitor_interativo`; sem ele, abre o terminal real. As
+    chaves `aprovado_por_humano`, `confirmo_modo_real` e `respostas_humanas`
+    da entrada são ignoradas. Códigos: 0 executada; 2 entrada inválida ou sem
+    oferta; 3 recusada (confirmação ausente/divergente ou sem terminal).
+    """
+    inicio = time.monotonic()
+    if str(RAIZ_SRC) not in sys.path:
+        sys.path.insert(0, str(RAIZ_SRC))
+    from ponte_openrouter import continuidade as c
+
+    def _fim(saida: dict, codigo: int) -> tuple[dict, int]:
+        if log_path is not None:
+            registro = construir_registro(
+                saida, codigo, time.monotonic() - inicio, stdout=json.dumps(saida, ensure_ascii=False), stderr=""
+            )
+            gravar_registro(registro, log_path)
+        return saida, codigo
+
+    try:
+        oferta = c.montar_oferta_de_json(entrada)
+    except ValueError as exc:
+        return _fim({"erro": str(exc), "tipo_erro": "EntradaInvalidaError"}, 2)
+    if oferta is None:
+        return _fim({"erro": "não há oferta de continuidade para este sinal.", "tipo_erro": "SemOferta"}, 2)
+    prompt = entrada.get("prompt_ficticio") if isinstance(entrada.get("prompt_ficticio"), str) else ""
+    try:
+        registro = c.executar_oferta_confirmada(oferta, prompt, leitor)
+    except ValueError:
+        return _fim({"erro": "prompt inválido para o contexto mínimo.", "tipo_erro": "ContextoInvalido"}, 2)
+    saida = {"continuidade": dict(registro, etapa="execucao")}
+    return _fim(saida, 0 if registro["autorizado"] else 3)
 
 
 def _ler_log_path(argv: list[str]):
@@ -247,6 +296,7 @@ def main() -> int:
         )
         return 2
 
+    interativo = "--continuidade-interativa" in sys.argv[1:]
     bruto = sys.stdin.read()
 
     try:
@@ -254,6 +304,15 @@ def main() -> int:
     except json.JSONDecodeError as exc:
         print(json.dumps({"erro": f"JSON de entrada inválido: {exc}", "tipo_erro": "JSONDecodeError"}))
         return 2
+
+    if interativo:
+        try:
+            saida, codigo_saida = executar_continuidade_interativa(entrada, log_path=log_path)
+            print(json.dumps(saida, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            print(json.dumps({"erro": "falha inesperada no cliente local.", "tipo_erro": type(exc).__name__}))
+            return 1
+        return codigo_saida
 
     # Fase 4E: guarda-chuva final - mesmo uma falha totalmente inesperada
     # aqui (fora do que invocar_adaptador já trata) produz JSON estruturado

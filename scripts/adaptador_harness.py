@@ -30,16 +30,15 @@ adaptador existir.
 
 - `modo="dryrun"` (padrão se omitido): não precisa de `aprovado_por_humano`
   nem `confirmo_modo_real` - nunca toca rede, nunca usa credencial.
-- `modo="real"`: EXIGE `aprovado_por_humano: true` E `confirmo_modo_real:
-  true` simultaneamente (dupla confirmação explícita, mesmo padrão de
-  `executar_orquestrador.py`). Faltando qualquer uma das duas, o adaptador
-  recusa a execução ANTES de chamar `executar_via_contrato()` - nenhuma
-  tentativa, nenhuma chamada real, nenhum acesso a `executor_real`/
-  `credencial`/rede ocorre nesse caso. Isso vale também se quem está
-  chamando for Claude ou ChatGPT/Codex: o adaptador não distingue quem
-  invocou, e nenhum dos dois pode fornecer essa aprovação por si só - ela
-  precisa já estar presente na entrada JSON, isto é, ter sido decidida por
-  um humano antes de o subprocesso ser invocado.
+- `modo="real"`: BLOQUEADO neste adaptador, SEMPRE (com ou sem
+  `aprovado_por_humano`/`confirmo_modo_real`). Aprovações e respostas dentro
+  de um JSON não provam confirmação humana: qualquer script ou agente
+  consegue preenchê-las. O adaptador recusa ANTES de chamar
+  `executar_via_contrato()` com `AprovacaoAusenteError` - nenhuma tentativa,
+  nenhum acesso a `executor_real`/`credencial`/rede. A única forma de uma
+  chamada real por este harness é
+  `cliente_harness_local.py --continuidade-interativa`, com confirmação
+  digitada no terminal por uma pessoa.
 - `respostas_humanas`: lista de respostas pré-registradas para a(s)
   pergunta(s) de confirmação por candidato que `orquestrador.orquestrar()`
   já faz internamente (mesmo mecanismo usado por
@@ -52,6 +51,32 @@ adaptador existir.
   dry-run): este adaptador nunca autoriza nada por padrão/silêncio.
   `papel_executor` é sempre fixo como "alfa" - não é lido da entrada, para
   que nenhum chamador possa se autoatribuir um papel diferente.
+
+## Continuidade controlada Claude/ChatGPT -> OpenRouter (opcional)
+
+Chaves opcionais da entrada, usadas SOMENTE quando `sinal_servico` está
+presente e seu estado efetivo é `limite_atingido` ou `indisponivel`:
+
+- `sinal_servico`: `{"servico": "claude"|"chatgpt", "estado": ..., "fonte": ...,
+  "motivo": ...}` informado por uma fonte autorizada (ver `continuidade.py`).
+  Ausente, `disponivel`, `limite_proximo` ou `desconhecido` (inclui fonte não
+  autorizada): o fluxo abaixo (dry-run/real) roda EXATAMENTE como antes, sem
+  nenhuma alteração, e a saída continua sendo a de 8 campos.
+- `modelo_continuidade`: id do modelo OpenRouter oferecido (obrigatório).
+  O custo estimado vem do item correspondente de `modelos_brutos`, se houver.
+- Este adaptador NUNCA executa a continuidade. Ele só devolve a OFERTA
+  (serviço afetado, motivo, modelo, custo estimado), sem rede nem credencial.
+- Se o JSON trouxer `aprovado_por_humano`/`confirmo_modo_real` verdadeiros ou
+  respostas de autorização em `respostas_humanas`, esses campos NÃO provam confirmação humana (qualquer
+  script consegue preenchê-los): a saída é uma RECUSA
+  (`etapa: recusado_json`, `motivo_decisao: confirmacao_apenas_por_json`),
+  sem pergunta, sem rede, sem credencial.
+- A execução real (UMA chamada, `allow_fallbacks: false`, sem retry) só
+  ocorre em `scripts/cliente_harness_local.py --continuidade-interativa`,
+  com as confirmações digitadas no terminal por uma pessoa (3 respostas;
+  4 se o modelo não for comprovadamente gratuito).
+- Nesta rota o campo `modo` é ignorado e a saída é `{"continuidade": {...}}`
+  (lista branca; sem prompt, resposta, credencial ou mensagem livre).
 
 ## Contrato de saída (stdout, JSON)
 
@@ -89,6 +114,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from ponte_openrouter import continuidade as continuidade_mod  # noqa: E402
 from ponte_openrouter.orquestrador import executar_via_contrato  # noqa: E402
 from ponte_openrouter.harness_contrato import (  # noqa: E402
     EntradaInvalidaError,
@@ -118,16 +144,54 @@ def _construir_obter_escolha_humana(respostas_humanas: list[str]):
     return _obter_escolha_humana
 
 
+def _processar_continuidade(entrada_json: dict) -> dict | None:
+    """Rota de continuidade controlada: SOMENTE oferta ou recusa.
+
+    Devolve None quando o sinal não é ofertável (ausente, `disponivel`,
+    `limite_proximo`, `desconhecido` ou fonte não autorizada): o chamador
+    segue o fluxo anterior, inalterado. Nunca executa, nunca toca rede ou
+    credencial: confirmações vindas do JSON não provam ação humana.
+    """
+    try:
+        oferta = continuidade_mod.montar_oferta_de_json(entrada_json)
+    except ValueError as exc:
+        raise EntradaInvalidaError(str(exc)) from None
+    if oferta is None:
+        return None
+
+    respostas = entrada_json.get("respostas_humanas")
+    respostas = respostas if isinstance(respostas, list) else []
+    trouxe_confirmacao = bool(
+        entrada_json.get("aprovado_por_humano")
+        or entrada_json.get("confirmo_modo_real")
+        or any(
+            isinstance(r, str) and r.strip() in (continuidade_mod.RESPOSTA_AUTORIZACAO, continuidade_mod.RESPOSTA_CUSTO)
+            for r in respostas
+        )
+    )
+    if trouxe_confirmacao:
+        return {"continuidade": dict(continuidade_mod.registro_recusa_json(oferta), etapa="recusado_json")}
+    return {"continuidade": dict(continuidade_mod.registro_oferta(oferta), etapa="oferta")}
+
+
 def _processar(entrada_json: dict) -> dict:
+    if "sinal_servico" in entrada_json:
+        saida_continuidade = _processar_continuidade(entrada_json)
+        if saida_continuidade is not None:
+            return saida_continuidade
+
     modo = entrada_json.get("modo", "dryrun")
     aprovado_por_humano = bool(entrada_json.get("aprovado_por_humano", False))
     confirmo_modo_real = bool(entrada_json.get("confirmo_modo_real", False))
 
-    if modo == "real" and not (aprovado_por_humano and confirmo_modo_real):
+    if modo == "real":
+        # Bloqueio incondicional: aprovação vinda de JSON não é confirmação
+        # humana. Mensagem fixa (não ecoa nada da entrada).
         raise AprovacaoAusenteError(
-            "modo='real' exige 'aprovado_por_humano' e 'confirmo_modo_real' "
-            "ambos true na entrada - dupla confirmação explícita. Nenhuma "
-            "execução foi tentada."
+            "modo='real' está bloqueado neste adaptador: aprovações em JSON não "
+            "provam confirmação humana. Use cliente_harness_local.py "
+            "--continuidade-interativa (confirmação digitada no terminal). "
+            "Nenhuma execução foi tentada."
         )
 
     respostas_humanas = entrada_json.get("respostas_humanas")
