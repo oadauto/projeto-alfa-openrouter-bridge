@@ -124,6 +124,15 @@ registrar, por lista branca, codigo de saida, duracao, modelo, status HTTP e
 sucesso/falha - nunca a resposta do modelo, o prompt, mensagens livres de erro
 ou segredos. Ver `docs/fase5-observabilidade.md`.
 
+## CI e secret scanning
+
+Todo PR para `main` roda `.github/workflows/ci.yml` (testes) e
+`.github/workflows/seguranca.yml` (varredura de segredos com
+`scripts/verificar_segredos.py`). Os workflows não usam credencial, não
+chamam o OpenRouter e não imprimem prompts, respostas ou logs. Proteção da
+`main` e secret scanning nativo dependem de configuração manual no GitHub.
+Ver `docs/ci-e-secret-scanning.md`.
+
 ## Estrutura
 
 Ver `docs/ARQUITETURA.md` para os 6 componentes e o fluxo completo de decisão.

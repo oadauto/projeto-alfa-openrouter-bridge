@@ -1,0 +1,43 @@
+name: Segurança
+
+# Varredura de segredos e higiene de arquivos rastreados, sem dependências
+# externas (scripts/verificar_segredos.py, só biblioteca padrão + git).
+# O verificador nunca imprime o conteúdo encontrado: só `arquivo:linha [padrão]`.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * 1"   # segunda-feira, 05:17 UTC - reexecuta na main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seguranca-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  varredura-de-segredos:
+    name: varredura de segredos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # necessário para varrer o histórico do PR
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Varrer arquivos rastreados e caminhos proibidos
+        run: python scripts/verificar_segredos.py
+
+      - name: Varrer o histórico do PR (linhas adicionadas por cada commit)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python scripts/verificar_segredos.py --historico "origin/${BASE_REF}"

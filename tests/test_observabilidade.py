@@ -32,8 +32,8 @@ from observabilidade import (  # noqa: E402
 )
 
 # Valores fictícios, com o formato típico de segredos - NUNCA reais.
-CHAVE_FICTICIA = "sk-or-v1-FICTICIA0123456789abcdefghijklmnop"
-BEARER_FICTICIO = "Bearer abcDEF123456.token-ficticio_xyz"
+CHAVE_FICTICIA = "sk-or-v1-FICTICIA0123456789abcdefghijklmnop"  # alfa-allow-secret: valor fictício
+BEARER_FICTICIO = "Bearer abcDEF123456.token-ficticio_xyz"  # alfa-allow-secret: valor fictício
 TEXTO_DA_RESPOSTA = "TEXTO_DA_RESPOSTA_DO_MODELO_QUE_NAO_PODE_SER_REGISTRADO"
 
 CAMPOS_REGISTRO = {
